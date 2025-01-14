@@ -1,0 +1,16 @@
+# TaxSEA Test Data (refer to https://github.com/feargalr/TaxSEA/blob/main/data/TaxSEA_test_data.rda)
+TaxSEA_test_data.rda
+
+# RStudio generated files
+.RData
+.Rhistory
+.Rproj.user
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
