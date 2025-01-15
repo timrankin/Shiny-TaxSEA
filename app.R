@@ -51,7 +51,7 @@ ui <- page_sidebar(
     "TODO: Taxa of interest, a searchable drop-down kinda widget would be great here",
     
     actionButton(
-      "exampleData",
+      "loadExample",
       "Load example data"
     )
   ),
@@ -83,12 +83,19 @@ ui <- page_sidebar(
 )
 
 server <- function(input, output, session) {
+  # Reactive value to store data from either user supplied file or example data
+  data <- reactiveVal(NULL)
+  
+  # Read example data
+  observeEvent(input$loadExample, {
+    exampleData <- read.csv("test_input.csv", header = TRUE)
+    data(exampleData)
+  })
+  
   # Read uploaded file
-  suppliedData <- reactive({
+  observeEvent(input$file, {
     req(input$file)
-    data <- read.csv(input$file$datapath, header = input$hasHeaders)
-    
-    # Validate the structure of the data
+    suppliedData <- read.csv(input$file$datapath, header = input$hasHeaders)
     if (ncol(data) != 4 ||
         !is.character(data[[1]]) ||
         !is.numeric(data[[2]]) ||
@@ -97,19 +104,36 @@ server <- function(input, output, session) {
       # TODO: Rather than crashing, turn this into a warning message in the UI.
       stop("The supplied file must have 4 columns: Taxa, log 2-fold change, P value, and Padj or FD")
     }
-    
-    return(data)
+    data(suppliedData)
   })
+  
+  # Read uploaded file - OLD
+  # suppliedData <- reactive({
+  #   req(input$file)
+  #   data <- read.csv(input$file$datapath, header = input$hasHeaders)
+  #   
+  #   # Validate the structure of the data
+  #   if (ncol(data) != 4 ||
+  #       !is.character(data[[1]]) ||
+  #       !is.numeric(data[[2]]) ||
+  #       !is.numeric(data[[3]]) ||
+  #       !is.numeric(data[[4]])) {
+  #     # TODO: Rather than crashing, turn this into a warning message in the UI.
+  #     stop("The supplied file must have 4 columns: Taxa, log 2-fold change, P value, and Padj or FD")
+  #   }
+  #   
+  #   return(data)
+  # })
   
   # Run TaxSEA on data
   taxseaResults <- reactive({
     # Make sure data has been supplied in a valid format
-    req(suppliedData())
+    req(data())
     
     # TODO: catch errors and display something meaningful in the UI
     
     # Get taxon ranks from user supplied data
-    taxonRanks <- setNames(suppliedData()[[2]], suppliedData()[[1]])
+    taxonRanks <- setNames(data()[[2]], data()[[1]])
     
     results <- TaxSEA(taxonRanks)
     
@@ -156,6 +180,7 @@ server <- function(input, output, session) {
         x = "-log10 P value",
         y = "gutMGene taxon sets"
       ) +
+      geom_vline(xintercept = -log10(0.1), linetype = 5) +
       theme_minimal()
     
   })
