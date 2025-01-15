@@ -3,12 +3,16 @@
 #
 
 library(shiny)
+library(shinyjs)
 library(tidyverse)
 library(bslib)
 library(bsicons)
+library(openxlsx2)
 library(DT)
 library(TaxSEA)
 
+# Helper to display P values and FDR values in scientific notation, without changing the dataframe values to text formatted in scientific notation.
+# There is an open issue for this functionality in DT: https://github.com/rstudio/DT/issues/938
 jsExponential <- c(
   "function(row, data, displayNum, index){",
   "  for (var i = 3; i <= 4; i++) {",
@@ -20,6 +24,24 @@ jsExponential <- c(
   "}"
 )
 
+# Helper to detect header rows in supplied (or example) data
+has_header <- function(file_path) {
+  if (tools::file_ext(file_path) == "csv") {
+    first_row <- read.csv(file_path, header = FALSE, nrows = 1, stringsAsFactors = FALSE)
+  } else if (tools::file_ext(file_path) %in% c("xlsx", "xlsm")) {
+    first_row <- read_xlsx(file_path, col_names = FALSE, rows = 1)
+  }
+  
+  # Check if all columns in the first row are numeric, except for the first column
+  is_numeric <- sapply(first_row[-1], is.numeric)
+  
+  if(all(is_numeric)) {
+    return(FALSE)
+  } else {
+    return(TRUE)
+  }
+}
+
 ui <- page_sidebar(
   title = "Shiny TaxSEA",
   
@@ -28,25 +50,24 @@ ui <- page_sidebar(
       "file",
       label = tooltip(
         trigger = list(
-          "Data for analysis",
+          "Differential abundance data for analysis",
           bs_icon("question-circle")
-        ), "This is a Microsoft Excel ®️ or csv file with columns for: Taxa, log 2-fold change, P value, and Padj / FDR"
+        ), "Browser for a Microsoft Excel ®️ or csv file with columns for: Taxa, log 2-fold change, P value, and Padj / FDR"
       ) 
     ),
     
-    checkboxInput(
-      "hasHeaders",
-      "The supplied data has headers",
-      value = FALSE
-    ),
+    # TODO: Delete if auto detection works well
+    # checkboxInput(
+    #   "hasHeaders",
+    #   "The supplied data has headers",
+    #   value = FALSE
+    # ),
     
     selectInput(
       "database_selection",
-      "Select results to display in the table",
+      "Select TaxSEA results to display",
       choices = list("Metabolites" = "Metabolite_producers", "Health Associations" = "Health_associations", "BugSigDB" = "BugSigdB")
     ),
-    
-    hr(),
     
     "TODO: Taxa of interest, a searchable drop-down kinda widget would be great here",
     
@@ -58,11 +79,11 @@ ui <- page_sidebar(
   
   layout_columns(
     card(
-      card_header("Plot 1"),
+      card_header("Bar Plot"),
       plotOutput("barPlot")
     ),
     card(
-      card_header("Plot 2"),
+      card_header("Volcano Plot"),
       plotOutput("volcanoPlot")
     )
   ),
@@ -70,7 +91,7 @@ ui <- page_sidebar(
   card(
     card_header(
       class = "d-flex align-items-center",
-      "Table",
+      "TaxSEA Results",
       downloadButton(
         "downloadButton",
         "Download",
@@ -83,47 +104,44 @@ ui <- page_sidebar(
 )
 
 server <- function(input, output, session) {
+  # Disable download button until there are results available to download
+  shinyjs::disable("downloadButton")
+  
+  # Notifications variable, used if > 8 rows are selected in table
+  notificationIds <- NULL
+  
   # Reactive value to store data from either user supplied file or example data
   data <- reactiveVal(NULL)
   
-  # Read example data
+  # Handle example data button click & load example data
   observeEvent(input$loadExample, {
-    exampleData <- read.csv("test_input.csv", header = TRUE)
+    exampleData <- read.csv("test_input.csv", header = has_header("test_input.csv"))
     data(exampleData)
   })
   
   # Read uploaded file
   observeEvent(input$file, {
     req(input$file)
-    suppliedData <- read.csv(input$file$datapath, header = input$hasHeaders)
-    if (ncol(data) != 4 ||
-        !is.character(data[[1]]) ||
-        !is.numeric(data[[2]]) ||
-        !is.numeric(data[[3]]) ||
-        !is.numeric(data[[4]])) {
-      # TODO: Rather than crashing, turn this into a warning message in the UI.
-      stop("The supplied file must have 4 columns: Taxa, log 2-fold change, P value, and Padj or FD")
+    
+    if (tools::file_ext(input$file$datapath) == "csv") {
+      suppliedData <- read.csv(input$file$datapath, header = has_header(input$file$datapath))
+      
+      if (ncol(suppliedData) != 4 ||
+          !is.character(suppliedData[[1]]) ||
+          !is.numeric(suppliedData[[2]]) ||
+          !is.numeric(suppliedData[[3]]) ||
+          !is.numeric(suppliedData[[4]])) {
+        # TODO: Rather than crashing, turn this into a warning message in the UI.
+        stop("The supplied file must have 4 columns: Taxa, log 2-fold change, P value, and Padj or FD")
+      }
+      
+      data(suppliedData)
+    } else if (tools::file_ext(input$file$datapath) %in% c("xlsx", "xlsm")) {
+      suppliedData <- read_xlsx(input$file$datapath, col_names = has_header(input$file$datapath))
     }
+    
     data(suppliedData)
   })
-  
-  # Read uploaded file - OLD
-  # suppliedData <- reactive({
-  #   req(input$file)
-  #   data <- read.csv(input$file$datapath, header = input$hasHeaders)
-  #   
-  #   # Validate the structure of the data
-  #   if (ncol(data) != 4 ||
-  #       !is.character(data[[1]]) ||
-  #       !is.numeric(data[[2]]) ||
-  #       !is.numeric(data[[3]]) ||
-  #       !is.numeric(data[[4]])) {
-  #     # TODO: Rather than crashing, turn this into a warning message in the UI.
-  #     stop("The supplied file must have 4 columns: Taxa, log 2-fold change, P value, and Padj or FD")
-  #   }
-  #   
-  #   return(data)
-  # })
   
   # Run TaxSEA on data
   taxseaResults <- reactive({
@@ -138,6 +156,7 @@ server <- function(input, output, session) {
     results <- TaxSEA(taxonRanks)
     
     # Make results presentable
+    # TODO: Only apply this function to disease & metabolites - bsdb requires its own to remove hyphens etc.
     results <- lapply(results, function(df) {
       # Remove rownames
       rownames(df) <- NULL
@@ -155,40 +174,70 @@ server <- function(input, output, session) {
       df$`Taxon Set Members` <- df$`Taxon Set Members` %>%
         str_replace_all("_", " ")
       
-      
       return(df)
     })
+    
+    shinyjs::enable("downloadButton")
     
     return(results)
   })
   
-  # Render the histogram
+  # Render the bar plot
   output$barPlot <- renderPlot({
-    # Make sure data has been supplied in a valid format
+    # Make sure data has been supplied and in a valid format
     req(taxseaResults())
     
-    dataForPlot <- taxseaResults()$Metabolite_producers %>%
-      mutate(negativeLog10PValue = -log10(taxseaResults()$Metabolite_producers[[3]])) %>%
-      mutate(`Taxon Set` = factor(`Taxon Set`, levels = `Taxon Set`[order(negativeLog10PValue, decreasing = FALSE)])) %>%
-      arrange(desc(negativeLog10PValue)) %>%
-      slice_head(n = 6)
+    # Store selected rows, even if this is 0
+    selected_rows <- input$table_rows_selected
     
-    ggplot(dataForPlot, aes(x = negativeLog10PValue, y = `Taxon Set`)) +
+    if(is.null(selected_rows)) {
+      # Plot top 6 results based on -log10 FDR values
+      dataForPlot <- taxseaResults()[[input$database_selection]] %>%
+        mutate(negativeLog10FDR = -log10(taxseaResults()[[input$database_selection]][[4]])) %>%
+        mutate(`Taxon Set` = factor(`Taxon Set`, levels = `Taxon Set`[order(negativeLog10FDR, decreasing = FALSE)])) %>%
+        arrange(desc(negativeLog10FDR)) %>%
+        slice_head(n = 8)
+    } else if (length(selected_rows) <=8) {
+      # Plot the selected rows
+      dataForPlot <- taxseaResults()[[input$database_selection]][selected_rows, ] %>%
+        mutate(negativeLog10FDR = -log10(taxseaResults()[[input$database_selection]][selected_rows, ][[4]])) %>%
+        mutate(`Taxon Set` = factor(`Taxon Set`, levels = `Taxon Set`[order(negativeLog10FDR, decreasing = FALSE)])) %>%
+        arrange(desc(negativeLog10FDR))
+    } else {
+      # Display the first 8 the user selected if possible, together with a warning
+      dataForPlot <- taxseaResults()[[input$database_selection]][selected_rows[1:8], ] %>%
+        mutate(negativeLog10FDR = -log10(taxseaResults()[[input$database_selection]][selected_rows[1:8], ][[4]])) %>%
+        mutate(`Taxon Set` = factor(`Taxon Set`, levels = `Taxon Set`[order(negativeLog10FDR, decreasing = FALSE)])) %>%
+        arrange(desc(negativeLog10FDR))
+      
+      notificationId <<- showNotification(
+        "⚠️ Bar plot limited to a max of 8 Taxon Sets. Your first 8 selections are displayed, deselect some in order to add more.",
+        duration = 10,
+        closeButton = TRUE,
+        type = "warning"
+      )
+      }
+    
+    ggplot(dataForPlot, aes(x = negativeLog10FDR, y = `Taxon Set`)) +
       geom_col(fill = "steelblue") +
       labs(
-        title = "Top 6 -log10 P values",
-        x = "-log10 P value",
+        title = "-log10 FDR values", # @Feargal, is this needed?
+        x = "-log10 FDR value",
         y = "gutMGene taxon sets"
       ) +
       geom_vline(xintercept = -log10(0.1), linetype = 5) +
-      theme_minimal()
-    
+      theme_minimal() +
+      theme(
+        axis.text = element_text(size = 12, lineheight = 1.2)
+      )
   })
   
   # TODO: Render the volcano plot
-  
   # output$volcanoPlot < renderPlot({
-  #   
+  #   req(data)
+  #   dataForPlot <- data
+  #   dataForPlot$metabolites = rownames(dataForPlot) %in% c("Streptococcus_salivarius", "Escherichia_coli", "Haemophilus_parainfluenzae", "Streptococcus_parasanguinis", "Streptococcus_australis", "Bifidobacterium_adolescentis", "Streptococcus_mitis", "Streptococcus_mutans", "Streptococcus_sanguinis", "Klebsiella_pneumoniae", "Enterococcus_faecium", "Streptococcus_vestibularis")
+  #   dataForPlot$metabolites[dataForPlot$metabolites==TRUE] = "IPA_producers"
   # })
   
   # Render the data table
@@ -208,7 +257,8 @@ server <- function(input, output, session) {
             targets = c(3, 4), width = "75px"
           )
         ),
-        rowCallback = JS(jsExponential)
+        rowCallback = JS(jsExponential),
+        selection = 'multiple'
       )
     ) %>%
       formatRound(
@@ -221,13 +271,7 @@ server <- function(input, output, session) {
       )
   })
   
-  # observeEvent(
-  #   
-  # )
-  
-  # Load example data
-  
-  
+
   # Handle downloads
   output$downloadButton <- downloadHandler(
     filename = function() {
