@@ -46,13 +46,14 @@ ui <- page_sidebar(
   title = "Shiny TaxSEA",
   
   sidebar = sidebar(
+    width = "310px",
     fileInput(
       "file",
       label = tooltip(
         trigger = list(
           "Differential abundance data for analysis",
           bs_icon("question-circle")
-        ), "Browser for a Microsoft Excel ®️ or csv file with columns for: Taxa, log 2-fold change, P value, and Padj / FDR"
+        ), "Browse for a Microsoft Excel ®️ or csv file with columns for: Taxa, log 2-fold change, P value, and Padj / FDR"
       ) 
     ),
     
@@ -69,8 +70,6 @@ ui <- page_sidebar(
       choices = list("Metabolites" = "Metabolite_producers", "Health Associations" = "Health_associations", "BugSigDB" = "BugSigdB")
     ),
     
-    "TODO: Taxa of interest, a searchable drop-down kinda widget would be great here",
-    
     actionButton(
       "loadExample",
       "Load example data"
@@ -79,11 +78,21 @@ ui <- page_sidebar(
   
   layout_columns(
     card(
-      card_header("Bar Plot"),
+      card_header(
+        "Bar Plot",
+        tooltip(
+          bs_icon("info-circle"),
+          "Select up to 8 Taxon Sets below to display in this plot. If no selection is made, the top 8 Taxon Sets by -log10 FDR value will be displayed"
+        )),
       plotOutput("barPlot")
     ),
     card(
-      card_header("Volcano Plot"),
+      card_header(
+        "Volcano Plot",
+        tooltip(
+          bs_icon("info-circle"),
+          "The last selection you make below will be used to title the plot and highlight taxon set members of interest. If no selection is made, the top result by -log10 FDR will be displayed"
+        )),
       plotOutput("volcanoPlot")
     )
   ),
@@ -182,32 +191,37 @@ server <- function(input, output, session) {
     return(results)
   })
   
+  # TODO: see if this is actually necessary (it probably isn't)
+  # 'Debounce' clicks on table rows, so we don't redraw the plots too frequently
+  debounced_selection <- debounce(
+    reactive(input$table_rows_selected),
+    millis = 0  # 500 ms delay
+  )
+  
   # Render the bar plot
   output$barPlot <- renderPlot({
     # Make sure data has been supplied and in a valid format
     req(taxseaResults())
     
     # Store selected rows, even if this is 0
-    selected_rows <- input$table_rows_selected
+    selected_rows <- debounced_selection()
+    # selected_rows <- input$table_rows_selected
     
     if(is.null(selected_rows)) {
       # Plot top 6 results based on -log10 FDR values
       dataForPlot <- taxseaResults()[[input$database_selection]] %>%
         mutate(negativeLog10FDR = -log10(taxseaResults()[[input$database_selection]][[4]])) %>%
-        mutate(`Taxon Set` = factor(`Taxon Set`, levels = `Taxon Set`[order(negativeLog10FDR, decreasing = FALSE)])) %>%
         arrange(desc(negativeLog10FDR)) %>%
         slice_head(n = 8)
     } else if (length(selected_rows) <=8) {
       # Plot the selected rows
       dataForPlot <- taxseaResults()[[input$database_selection]][selected_rows, ] %>%
         mutate(negativeLog10FDR = -log10(taxseaResults()[[input$database_selection]][selected_rows, ][[4]])) %>%
-        mutate(`Taxon Set` = factor(`Taxon Set`, levels = `Taxon Set`[order(negativeLog10FDR, decreasing = FALSE)])) %>%
         arrange(desc(negativeLog10FDR))
     } else {
       # Display the first 8 the user selected if possible, together with a warning
       dataForPlot <- taxseaResults()[[input$database_selection]][selected_rows[1:8], ] %>%
         mutate(negativeLog10FDR = -log10(taxseaResults()[[input$database_selection]][selected_rows[1:8], ][[4]])) %>%
-        mutate(`Taxon Set` = factor(`Taxon Set`, levels = `Taxon Set`[order(negativeLog10FDR, decreasing = FALSE)])) %>%
         arrange(desc(negativeLog10FDR))
       
       notificationId <<- showNotification(
@@ -218,27 +232,38 @@ server <- function(input, output, session) {
       )
       }
     
-    ggplot(dataForPlot, aes(x = negativeLog10FDR, y = `Taxon Set`)) +
+    ggplot(dataForPlot, aes(x = negativeLog10FDR, y = reorder(str_wrap(`Taxon Set`, width = 30), negativeLog10FDR))) +
       geom_col(fill = "steelblue") +
       labs(
         title = "-log10 FDR values", # @Feargal, is this needed?
         x = "-log10 FDR value",
-        y = "gutMGene taxon sets"
+        y = "Taxon Sets"
       ) +
       geom_vline(xintercept = -log10(0.1), linetype = 5) +
       theme_minimal() +
       theme(
-        axis.text = element_text(size = 12, lineheight = 1.2)
+        axis.text = element_text(size = 12),
       )
   })
   
-  # TODO: Render the volcano plot
-  # output$volcanoPlot < renderPlot({
-  #   req(data)
-  #   dataForPlot <- data
-  #   dataForPlot$metabolites = rownames(dataForPlot) %in% c("Streptococcus_salivarius", "Escherichia_coli", "Haemophilus_parainfluenzae", "Streptococcus_parasanguinis", "Streptococcus_australis", "Bifidobacterium_adolescentis", "Streptococcus_mitis", "Streptococcus_mutans", "Streptococcus_sanguinis", "Klebsiella_pneumoniae", "Enterococcus_faecium", "Streptococcus_vestibularis")
-  #   dataForPlot$metabolites[dataForPlot$metabolites==TRUE] = "IPA_producers"
-  # })
+  # Render the volcano plot
+  output$volcanoPlot <- renderPlot({
+    req(data())
+
+    dataForPlot <- data()
+
+    # Store selected rows, it will be NULL if none are selected
+    last_row_selected <- debounced_selection()[length(debounced_selection())]
+
+    if (is.null(last_row_selected)) {
+      # Taxon set members
+    }
+
+    dataForPlot$is_of_interest <- dataForPlot[[1]] %in% c("Bacteroides_vulgatus")
+
+    ggplot(dataForPlot, aes(x = dataForPlot[,2], y = -log10(dataForPlot[,3]), color = is_of_interest)) +
+             geom_point()+theme_minimal()
+  })
   
   # Render the data table
   output$table = DT::renderDataTable({
