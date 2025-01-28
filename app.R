@@ -5,6 +5,7 @@
 library(shiny)
 library(shinyjs)
 library(tidyverse)
+library(ggrepel)
 library(bslib)
 library(bsicons)
 library(openxlsx2)
@@ -45,6 +46,8 @@ has_header <- function(file_path) {
 ui <- page_sidebar(
   title = "Shiny TaxSEA",
   
+  # TODO: RHS of the title, put a link to github issues page for the project.
+  
   sidebar = sidebar(
     width = "310px",
     fileInput(
@@ -53,7 +56,7 @@ ui <- page_sidebar(
         trigger = list(
           "Differential abundance data for analysis",
           bs_icon("question-circle")
-        ), "Browse for a Microsoft Excel ®️ or csv file with columns for: Taxa, log 2-fold change, P value, and Padj / FDR"
+        ), "Browse for a Microsoft Excel ®️ or CSV file with columns for: Taxa, log 2-fold change, P value, and Padj / FDR"
       ) 
     ),
     
@@ -76,6 +79,7 @@ ui <- page_sidebar(
     )
   ),
   
+  # TODO: Add download buttons for both plots, which only appear (or appar faded until) when we have plots to download.
   layout_columns(
     card(
       card_header(
@@ -91,7 +95,7 @@ ui <- page_sidebar(
         "Volcano Plot",
         tooltip(
           bs_icon("info-circle"),
-          "The last selection you make below will be used to title the plot and highlight taxon set members of interest. If no selection is made, the top result by -log10 FDR will be displayed"
+          "The last (most recent) selection you make below will be used to title the plot and highlight taxon set members of interest. If no selection is made, the top result by -log10 FDR will be displayed"
         )),
       plotOutput("volcanoPlot")
     )
@@ -101,6 +105,7 @@ ui <- page_sidebar(
     card_header(
       class = "d-flex align-items-center",
       "TaxSEA Results",
+      # TODO: Hide / grey out the button until we have data to download.
       downloadButton(
         "downloadButton",
         "Download",
@@ -114,6 +119,7 @@ ui <- page_sidebar(
 
 server <- function(input, output, session) {
   # Disable download button until there are results available to download
+  # TODO: Fix this, it doesn't work as expected.
   shinyjs::disable("downloadButton")
   
   # Notifications variable, used if > 8 rows are selected in table
@@ -186,17 +192,20 @@ server <- function(input, output, session) {
       return(df)
     })
     
+    #TODO: Remove once we have a solution that works. This is currently broken.
     shinyjs::enable("downloadButton")
     
     return(results)
   })
   
-  # TODO: see if this is actually necessary (it probably isn't)
-  # 'Debounce' clicks on table rows, so we don't redraw the plots too frequently
+  
+  # TODO: Remove - it isn't needed.
+  # 'Debounce' the clicks on table rows, so we don't redraw the plots too frequently
   debounced_selection <- debounce(
     reactive(input$table_rows_selected),
     millis = 0  # 500 ms delay
   )
+  
   
   # Render the bar plot
   output$barPlot <- renderPlot({
@@ -232,37 +241,82 @@ server <- function(input, output, session) {
       )
       }
     
-    ggplot(dataForPlot, aes(x = negativeLog10FDR, y = reorder(str_wrap(`Taxon Set`, width = 30), negativeLog10FDR))) +
-      geom_col(fill = "steelblue") +
+    ggplot(dataForPlot, aes(x = negativeLog10FDR, y = reorder(str_wrap(`Taxon Set`, width = 34), negativeLog10FDR))) +
+      geom_col(fill = "#00aedb") +
       labs(
-        title = "-log10 FDR values", # @Feargal, is this needed?
-        x = "-log10 FDR value",
+        x = expression(-log[10] ~ FDR),
         y = "Taxon Sets"
       ) +
       geom_vline(xintercept = -log10(0.1), linetype = 5) +
-      theme_minimal() +
+      theme_classic() +
       theme(
         axis.text = element_text(size = 12),
+        axis.title = element_text(size = 14)
       )
   })
   
   # Render the volcano plot
   output$volcanoPlot <- renderPlot({
     req(data())
+    req(taxseaResults())
 
     dataForPlot <- data()
-
-    # Store selected rows, it will be NULL if none are selected
+    
+    # Store last selected row, it will be NULL if none are selected
     last_row_selected <- debounced_selection()[length(debounced_selection())]
-
+    
+    # Debugging
+    print(last_row_selected)
+    
+    # If no selection is made, take the taxon set members from the top TaxSEA result. Otherwise, use the last selection.
     if (is.null(last_row_selected)) {
-      # Taxon set members
+      taxa_of_interest <- unlist(strsplit(taxseaResults()[[input$database_selection]][[5]][1], ", "))
+      plot_title <- taxseaResults()[[input$database_selection]][[1]][1]
+    } else {
+      taxa_of_interest <- unlist(strsplit(taxseaResults()[[input$database_selection]][[5]][last_row_selected], ", "))
+      plot_title <- taxseaResults()[[input$database_selection]][[1]][last_row_selected]
     }
 
-    dataForPlot$is_of_interest <- dataForPlot[[1]] %in% c("Bacteroides_vulgatus")
+    # TODO: Support hyphens as well as underscores (input may also be supplied with spaces already)
+    taxa_of_interest <- str_replace(taxa_of_interest, " ", "_")
+    
+    dataForPlot$is_of_interest <- dataForPlot[[1]] %in% taxa_of_interest
+    
+    label_data <- dataForPlot[dataForPlot$is_of_interest != FALSE & dataForPlot[[3]] < 0.05,]
+    label_data$Taxa <- gsub("_", " ", label_data$Taxa)
+    label_data$Abbreviated_taxa <- sub("^([A-Za-z])[a-z]+\\s", "\\1. ", label_data$Taxa)
+    
+    # Debugging
+    print(label_data)
+    print(head(dataForPlot))
 
-    ggplot(dataForPlot, aes(x = dataForPlot[,2], y = -log10(dataForPlot[,3]), color = is_of_interest)) +
-             geom_point()+theme_minimal()
+    ggplot(dataForPlot, aes(x = dataForPlot[,2], y = -log10(dataForPlot[,3]), color = is_of_interest, alpha=is_of_interest)) +
+      geom_point(aes(
+        size = is_of_interest
+      )) + 
+      theme_classic() +
+      labs(
+        title = plot_title,
+        x = "Input Ranks",
+        y = expression(-log[10] ~ FDR)
+      ) +
+      scale_alpha_manual(values = c("FALSE" = 0.3, "TRUE" = 1)) +
+      scale_color_manual(values = c("FALSE" = "grey50", "TRUE" = "steelblue")) +
+      scale_size_manual(values = c("FALSE" = 2, "TRUE" = 4)) +
+      geom_text_repel(data = label_data,
+                      aes(
+                        x = label_data[,2],
+                        y = -log10(label_data[,3]),
+                        label = Abbreviated_taxa,
+                        fontface = "italic"
+                        ),
+                      size = 5) +
+      theme(
+        plot.title = element_text(hjust = 0.5, face = "bold"),
+        axis.text = element_text(size = 12),
+        axis.title = element_text(size = 14),
+        legend.position = "none") +
+        geom_vline(xintercept = 0, linetype = 5)
   })
   
   # Render the data table
@@ -275,11 +329,14 @@ server <- function(input, output, session) {
         searching = FALSE,
         paging = FALSE,
         columnDefs = list(
+          # list(
+          #   targets = 1, width = "150px"
+          # ),
           list(
             targets = 2, width = "125px"
           ),
           list(
-            targets = c(3, 4), width = "75px"
+            targets = c(3, 4), width = "70px"
           )
         ),
         rowCallback = JS(jsExponential),
