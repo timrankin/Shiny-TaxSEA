@@ -44,9 +44,18 @@ has_header <- function(file_path) {
 }
 
 ui <- page_sidebar(
-  title = "Shiny TaxSEA",
-  
-  # TODO: RHS of the title, put a link to github issues page for the project.
+  shinyjs::useShinyjs(),
+  title = div (
+    class = "d-flex justify-content-between align-items-center w-100",
+    span("Shiny TaxSEA"),
+    tags$a(
+      href = "https://github.com/timrankin/Shiny-TaxSEA/issues",
+      target = "_blank",
+      class = "d-flex align-items-center text-decoration-none",
+      span("Report a bug", class = "me-2"),
+      bs_icon("bug-fill"),
+    )
+  ),
   
   sidebar = sidebar(
     width = "310px",
@@ -59,13 +68,6 @@ ui <- page_sidebar(
         ), "Browse for a Microsoft Excel ®️ or CSV file with columns for: Taxa, log 2-fold change, P value, and Padj / FDR"
       ) 
     ),
-    
-    # TODO: Delete if auto detection works well
-    # checkboxInput(
-    #   "hasHeaders",
-    #   "The supplied data has headers",
-    #   value = FALSE
-    # ),
     
     selectInput(
       "database_selection",
@@ -107,7 +109,7 @@ ui <- page_sidebar(
       "TaxSEA Results",
       # TODO: Hide / grey out the button until we have data to download.
       downloadButton(
-        "downloadButton",
+        "downloadTable",
         "Download",
         class = "btn-sm btn-primary ms-auto"
       )
@@ -118,10 +120,6 @@ ui <- page_sidebar(
 )
 
 server <- function(input, output, session) {
-  # Disable download button until there are results available to download
-  # TODO: Fix this, it doesn't work as expected.
-  shinyjs::disable("downloadButton")
-  
   # Notifications variable, used if > 8 rows are selected in table
   notificationIds <- NULL
   
@@ -193,7 +191,7 @@ server <- function(input, output, session) {
     })
     
     #TODO: Remove once we have a solution that works. This is currently broken.
-    shinyjs::enable("downloadButton")
+    # shinyjs::enable("downloadTable")
     
     return(results)
   })
@@ -355,7 +353,7 @@ server <- function(input, output, session) {
   
 
   # Handle downloads
-  output$downloadButton <- downloadHandler(
+  output$downloadTable <- downloadHandler(
     filename = function() {
       paste(input$database_selection, "_", Sys.Date(), ".csv", sep = "")
     },
@@ -363,6 +361,10 @@ server <- function(input, output, session) {
       write.csv(taxseaResults()[[input$database_selection]], file, row.names = FALSE)
     }
   )
+  
+  # Disable download button until there are results available to download
+  # TODO: Fix this, it doesn't work as expected.
+  shinyjs::disable("downloadTable")
 }
 
 # Run the application 
