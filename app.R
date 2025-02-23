@@ -3,7 +3,6 @@
 #
 
 library(shiny)
-library(shinyjs)
 library(tidyverse)
 library(ggrepel)
 library(bslib)
@@ -43,8 +42,43 @@ has_header <- function(file_path) {
   }
 }
 
+valid_input_format <- function(suppliedData) {
+  if (ncol(suppliedData) != 4) {
+    showModal(modalDialog(
+      title = "Input Error",
+      "Incorrect number of input columns. Expecting exactly 4; Taxa, log 2-fold change, P value, and Padj or FDR."
+    ))
+    return(FALSE)
+  } else if (!is.character(suppliedData[[1]])) {
+    showModal(modalDialog(
+      title = "Input Error",
+      "First column (Taxa) must be text"
+    ))
+    return(FALSE)
+  } else if (!is.numeric(suppliedData[[2]])) {
+    showModal(modalDialog(
+      title = "Input Error",
+      "Second column (log 2-fold change) must be numeric"
+    ))
+    return(FALSE)
+  } else if (!is.numeric(suppliedData[[3]]) || min(suppliedData[[3]]) < 0 || max(suppliedData[[3]]) > 1) {
+    showModal(modalDialog(
+      title = "Input Error",
+      "Third column (P value) must be a numeric value between 0 and 1"
+    ))
+    return(FALSE)
+  } else if (!is.numeric(suppliedData[[4]]) || min(suppliedData[[4]]) < 0 || max(suppliedData[[4]]) > 1) {
+    showModal(modalDialog(
+      title = "Input Error",
+      "Fourth column (Padj / FDR) must be a numeric value between 0 and 1."
+    ))
+    return(FALSE)
+  } else {
+    return(TRUE)
+  }
+}
+
 ui <- page_sidebar(
-  shinyjs::useShinyjs(),
   title = div (
     class = "d-flex justify-content-between align-items-center w-100",
     span("Shiny TaxSEA"),
@@ -65,7 +99,7 @@ ui <- page_sidebar(
         trigger = list(
           "Differential abundance data for analysis",
           bs_icon("question-circle")
-        ), "Browse for a Microsoft Excel ®️ or CSV file with columns for: Taxa, log 2-fold change, P value, and Padj / FDR"
+        ), "Browse for a Microsoft Excel️ (R) or CSV file with columns for: Taxa, log 2-fold change, P value, and Padj / FDR"
       ) 
     ),
     
@@ -77,54 +111,80 @@ ui <- page_sidebar(
     
     actionButton(
       "loadExample",
-      "Load example data"
-    )
-  ),
-  
-  # TODO: Add download buttons for both plots, which only appear (or appar faded until) when we have plots to download.
-  layout_columns(
-    card(
-      card_header(
-        "Bar Plot",
-        tooltip(
-          bs_icon("info-circle"),
-          "Select up to 8 Taxon Sets below to display in this plot. If no selection is made, the top 8 Taxon Sets by -log10 FDR value will be displayed"
-        )),
-      plotOutput("barPlot")
+      icon = icon("bolt"),
+      "Analyse sample data",
     ),
-    card(
-      card_header(
-        "Volcano Plot",
-        tooltip(
-          bs_icon("info-circle"),
-          "The last (most recent) selection you make below will be used to title the plot and highlight taxon set members of interest. If no selection is made, the top result by -log10 FDR will be displayed"
-        )),
-      plotOutput("volcanoPlot")
+    actionButton(
+      "downloadExample",
+      icon = icon("cloud-download"),
+      "Download sample data",
     )
   ),
   
-  card(
+  layout_columns(card(
     card_header(
       class = "d-flex align-items-center",
-      "TaxSEA Results",
-      # TODO: Hide / grey out the button until we have data to download.
-      downloadButton(
-        "downloadTable",
+      "Bar Plot",
+      tags$span(style = "margin-left: 5px"),
+      tooltip(
+        bs_icon("info-circle"),
+        "Select up to 8 Taxon Sets below to display in this plot. If no selection is made, the top 8 Taxon Sets by -log10 FDR value will be displayed"
+      ),
+      actionButton(
+        "downloadBarPlot",
+        icon = icon("cloud-download"),
         "Download",
         class = "btn-sm btn-primary ms-auto"
       )
     ),
-    # "Table goes here"
+    plotOutput("barPlot")
+  ),
+  card(
+    card_header(
+      class = "d-flex align-items-center",
+      "Volcano Plot",
+      tags$span(style = "margin-left: 5px"),
+      tooltip(
+        bs_icon("info-circle"),
+        "The last (most recent) selection you make below will be used to title the plot and highlight taxon set members of interest. If no selection is made, the top result by -log10 FDR will be displayed"
+      ),
+      actionButton(
+        "downloadVolcanoPlot",
+        icon = icon("cloud-download"),
+        "Download",
+        class = "btn-sm btn-primary ms-auto"
+      )
+    ),
+    plotOutput("volcanoPlot")
+  )), card(
+    card_header(
+      class = "d-flex align-items-center",
+      "TaxSEA Results",
+      # TODO: Hide / grey out the button until we have data to download.
+      actionButton(
+        "downloadTable",
+        icon = icon("cloud-download"),
+        "Download",
+        class = "btn-sm btn-primary ms-auto"
+      )
+    ),
     DTOutput("table")
   )
 )
 
 server <- function(input, output, session) {
+  # Disable all downlolad buttons initially
+  updateActionButton(session, "downloadTable", label = "Download", disabled = TRUE)
+  updateActionButton(session, "downloadBarPlot", label = "Download", disabled = TRUE)
+  updateActionButton(session, "downloadVolcanoPlot", label = "Download", disabled = TRUE)
+  
   # Notifications variable, used if > 8 rows are selected in table
   notificationIds <- NULL
   
   # Reactive value to store data from either user supplied file or example data
   data <- reactiveVal(NULL)
+  
+  is_sufficiently_enriched <- reactiveVal(NULL)
   
   # Handle example data button click & load example data
   observeEvent(input$loadExample, {
@@ -139,29 +199,21 @@ server <- function(input, output, session) {
     if (tools::file_ext(input$file$datapath) == "csv") {
       suppliedData <- read.csv(input$file$datapath, header = has_header(input$file$datapath))
       
-      if (ncol(suppliedData) != 4 ||
-          !is.character(suppliedData[[1]]) ||
-          !is.numeric(suppliedData[[2]]) ||
-          !is.numeric(suppliedData[[3]]) ||
-          !is.numeric(suppliedData[[4]])) {
-        # TODO: Rather than crashing, turn this into a warning message in the UI.
-        stop("The supplied file must have 4 columns: Taxa, log 2-fold change, P value, and Padj or FD")
-      }
-      
-      data(suppliedData)
     } else if (tools::file_ext(input$file$datapath) %in% c("xlsx", "xlsm")) {
       suppliedData <- read_xlsx(input$file$datapath, col_names = has_header(input$file$datapath))
     }
     
-    data(suppliedData)
+    if(valid_input_format(suppliedData)) {
+      return(data(suppliedData))
+    } else {
+      return()
+    }
   })
   
   # Run TaxSEA on data
   taxseaResults <- reactive({
     # Make sure data has been supplied in a valid format
     req(data())
-    
-    # TODO: catch errors and display something meaningful in the UI
     
     # Get taxon ranks from user supplied data
     taxonRanks <- setNames(data()[[2]], data()[[1]])
@@ -190,9 +242,6 @@ server <- function(input, output, session) {
       return(df)
     })
     
-    #TODO: Remove once we have a solution that works. This is currently broken.
-    # shinyjs::enable("downloadTable")
-    
     return(results)
   })
   
@@ -212,7 +261,6 @@ server <- function(input, output, session) {
     
     # Store selected rows, even if this is 0
     selected_rows <- debounced_selection()
-    # selected_rows <- input$table_rows_selected
     
     if(is.null(selected_rows)) {
       # Plot top 6 results based on -log10 FDR values
@@ -327,9 +375,6 @@ server <- function(input, output, session) {
         searching = FALSE,
         paging = FALSE,
         columnDefs = list(
-          # list(
-          #   targets = 1, width = "150px"
-          # ),
           list(
             targets = 2, width = "125px"
           ),
@@ -361,11 +406,24 @@ server <- function(input, output, session) {
       write.csv(taxseaResults()[[input$database_selection]], file, row.names = FALSE)
     }
   )
-  
-  # Disable download button until there are results available to download
-  # TODO: Fix this, it doesn't work as expected.
-  shinyjs::disable("downloadTable")
 }
+
+# JavaScript to disable and enable buttons
+jsCode <- "
+Shiny.addCustomMessageHandler('disable_button', function(id) {
+  document.getElementById(id).setAttribute('disabled', 'true');
+});
+
+Shiny.addCustomMessageHandler('enable_button', function(id) {
+  document.getElementById(id).removeAttribute('disabled');
+});
+"
+
+# Include JS in UI
+ui <- tagList(
+  tags$script(jsCode),
+  ui
+)
 
 # Run the application 
 shinyApp(ui = ui, server = server)
