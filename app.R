@@ -12,7 +12,7 @@ library(DT)
 library(TaxSEA)
 
 # Helper to display P values and FDR values in scientific notation, without changing the dataframe values to text formatted in scientific notation.
-# There is an open issue for this functionality in DT: https://github.com/rstudio/DT/issues/938
+# At the time of writing, there is an open issue for this functionality in DT: https://github.com/rstudio/DT/issues/938
 jsExponential <- c(
   "function(row, data, displayNum, index){",
   "  for (var i = 3; i <= 4; i++) {",
@@ -46,7 +46,7 @@ valid_input_format <- function(suppliedData) {
   if (ncol(suppliedData) != 4) {
     showModal(modalDialog(
       title = "Input Error",
-      "Incorrect number of input columns. Expecting exactly 4; Taxa, log 2-fold change, P value, and Padj or FDR."
+      "Incorrect number of input columns. Expecting exactly 4; Taxa, log 2-fold changes, P value, and Padj or FDR."
     ))
     return(FALSE)
   } else if (!is.character(suppliedData[[1]])) {
@@ -79,18 +79,7 @@ valid_input_format <- function(suppliedData) {
 }
 
 ui <- page_sidebar(
-  title = div (
-    class = "d-flex justify-content-between align-items-center w-100",
-    span("Shiny TaxSEA"),
-    tags$a(
-      href = "https://github.com/timrankin/Shiny-TaxSEA/issues",
-      target = "_blank",
-      class = "d-flex align-items-center text-decoration-none",
-      span("Report a bug", class = "me-2"),
-      bs_icon("bug-fill"),
-    )
-  ),
-  
+  title = "Shiny TaxSEA",
   sidebar = sidebar(
     width = "310px",
     fileInput(
@@ -106,18 +95,28 @@ ui <- page_sidebar(
     selectInput(
       "database_selection",
       "Select TaxSEA results to display",
-      choices = list("Metabolites" = "Metabolite_producers", "Health Associations" = "Health_associations", "BugSigDB" = "BugSigdB")
+      choices = list("Metabolites" = "Metabolite_producers", "Health Associations" = "Health_associations", "BugSigDB" = "BugSigDB")
     ),
     
     actionButton(
-      "loadExample",
+      "loadSampleData",
       icon = icon("bolt"),
       "Analyse sample data",
     ),
-    actionButton(
-      "downloadExample",
+    downloadButton(
+      "downloadSampleData",
       icon = icon("cloud-download"),
-      "Download sample data",
+      "Download sample data"
+    ),
+    div(
+      class = "text-center",
+      tags$a(
+        href = "https://github.com/timrankin/Shiny-TaxSEA/issues",
+        target = "_blank",
+        class = "d-flex align-items-center justify-content-center text-decoration-none",
+        span("Report a bug", class = "me-2"),
+        bs_icon("bug-fill")
+      )
     )
   ),
   
@@ -130,12 +129,7 @@ ui <- page_sidebar(
         bs_icon("info-circle"),
         "Select up to 8 Taxon Sets below to display in this plot. If no selection is made, the top 8 Taxon Sets by -log10 FDR value will be displayed"
       ),
-      actionButton(
-        "downloadBarPlot",
-        icon = icon("cloud-download"),
-        "Download",
-        class = "btn-sm btn-primary ms-auto"
-      )
+      uiOutput("downloadBarPlotUi"),
     ),
     plotOutput("barPlot")
   ),
@@ -148,49 +142,37 @@ ui <- page_sidebar(
         bs_icon("info-circle"),
         "The last (most recent) selection you make below will be used to title the plot and highlight taxon set members of interest. If no selection is made, the top result by -log10 FDR will be displayed"
       ),
-      actionButton(
-        "downloadVolcanoPlot",
-        icon = icon("cloud-download"),
-        "Download",
-        class = "btn-sm btn-primary ms-auto"
-      )
+      uiOutput("downloadVolcanoPlotUi"),
     ),
     plotOutput("volcanoPlot")
   )), card(
     card_header(
       class = "d-flex align-items-center",
       "TaxSEA Results",
-      # TODO: Hide / grey out the button until we have data to download.
-      actionButton(
-        "downloadTable",
-        icon = icon("cloud-download"),
-        "Download",
-        class = "btn-sm btn-primary ms-auto"
-      )
+      uiOutput("downloadDataTableUi"),
+      # actionButton(
+      #   "downloadTable",
+      #   icon = icon("cloud-download"),
+      #   "Download",
+      #   class = "btn-sm btn-primary ms-auto"
+      # )
     ),
     DTOutput("table")
   )
 )
 
 server <- function(input, output, session) {
-  # Disable all downlolad buttons initially
-  updateActionButton(session, "downloadTable", label = "Download", disabled = TRUE)
-  updateActionButton(session, "downloadBarPlot", label = "Download", disabled = TRUE)
-  updateActionButton(session, "downloadVolcanoPlot", label = "Download", disabled = TRUE)
-  
   # Notifications variable, used if > 8 rows are selected in table
   notificationIds <- NULL
   
   # Reactive value to store data from either user supplied file or example data
   data <- reactiveVal(NULL)
   
-  is_sufficiently_enriched <- reactiveVal(NULL)
+  barPlotReady <- reactiveVal(FALSE)
+  volcanoPlotReady <- reactiveVal(FALSE)
+  dataTableReady <- reactiveVal(FALSE)
   
-  # Handle example data button click & load example data
-  observeEvent(input$loadExample, {
-    exampleData <- read.csv("test_input.csv", header = has_header("test_input.csv"))
-    data(exampleData)
-  })
+  # TODO: implementing a check to display a warning if there are no taxon sets w/FDR <0.02. This probably belongs better in the TaxSEA function, otherwise DT
   
   # Read uploaded file
   observeEvent(input$file, {
@@ -209,7 +191,13 @@ server <- function(input, output, session) {
       return()
     }
   })
-  
+
+  # Handle example data button click & load example data
+  observeEvent(input$loadSampleData, {
+    exampleData <- read.csv("test_input.csv", header = has_header("test_input.csv"))
+    data(exampleData)
+  })
+    
   # Run TaxSEA on data
   taxseaResults <- reactive({
     # Make sure data has been supplied in a valid format
@@ -219,6 +207,11 @@ server <- function(input, output, session) {
     taxonRanks <- setNames(data()[[2]], data()[[1]])
     
     results <- TaxSEA(taxonRanks)
+    
+    # Drop column 5 from all results.
+    results$Metabolite_producers <- results$Metabolite_producers[, -5]
+    results$Health_associations <- results$Health_associations[, -5]
+    results$BugSigDB <- results$BugSigDB[, -5]
     
     # Make results presentable
     # TODO: Only apply this function to disease & metabolites - bsdb requires its own to remove hyphens etc.
@@ -241,40 +234,36 @@ server <- function(input, output, session) {
       
       return(df)
     })
-    
     return(results)
   })
   
-  
-  # TODO: Remove - it isn't needed.
   # 'Debounce' the clicks on table rows, so we don't redraw the plots too frequently
   debounced_selection <- debounce(
     reactive(input$table_rows_selected),
-    millis = 0  # 500 ms delay
+    millis = 500  # 500 ms delay
   )
   
-  
   # Render the bar plot
-  output$barPlot <- renderPlot({
+  barPlot <- reactive({
     # Make sure data has been supplied and in a valid format
     req(taxseaResults())
     
     # Store selected rows, even if this is 0
     selected_rows <- debounced_selection()
     
-    if(is.null(selected_rows)) {
+    if (is.null(selected_rows)) {
       # Plot top 6 results based on -log10 FDR values
       dataForPlot <- taxseaResults()[[input$database_selection]] %>%
         mutate(negativeLog10FDR = -log10(taxseaResults()[[input$database_selection]][[4]])) %>%
         arrange(desc(negativeLog10FDR)) %>%
         slice_head(n = 8)
-    } else if (length(selected_rows) <=8) {
+    } else if (length(selected_rows) <= 8) {
       # Plot the selected rows
       dataForPlot <- taxseaResults()[[input$database_selection]][selected_rows, ] %>%
         mutate(negativeLog10FDR = -log10(taxseaResults()[[input$database_selection]][selected_rows, ][[4]])) %>%
         arrange(desc(negativeLog10FDR))
     } else {
-      # Display the first 8 the user selected if possible, together with a warning
+      # Display the first 8 user selected taxon sets, together with a warning
       dataForPlot <- taxseaResults()[[input$database_selection]][selected_rows[1:8], ] %>%
         mutate(negativeLog10FDR = -log10(taxseaResults()[[input$database_selection]][selected_rows[1:8], ][[4]])) %>%
         arrange(desc(negativeLog10FDR))
@@ -285,9 +274,9 @@ server <- function(input, output, session) {
         closeButton = TRUE,
         type = "warning"
       )
-      }
+    }
     
-    ggplot(dataForPlot, aes(x = negativeLog10FDR, y = reorder(str_wrap(`Taxon Set`, width = 34), negativeLog10FDR))) +
+    plot <- ggplot(dataForPlot, aes(x = negativeLog10FDR, y = reorder(str_wrap(`Taxon Set`, width = 34), negativeLog10FDR))) +
       geom_col(fill = "#00aedb") +
       labs(
         x = expression(-log[10] ~ FDR),
@@ -299,76 +288,93 @@ server <- function(input, output, session) {
         axis.text = element_text(size = 12),
         axis.title = element_text(size = 14)
       )
+    barPlotReady(TRUE)
+    return(plot)
   })
+  
+  # Output the bar plot
+    output$barPlot <- renderPlot({
+      barPlot()
+    })
   
   # Render the volcano plot
-  output$volcanoPlot <- renderPlot({
-    req(data())
-    req(taxseaResults())
-
-    dataForPlot <- data()
-    
-    # Store last selected row, it will be NULL if none are selected
-    last_row_selected <- debounced_selection()[length(debounced_selection())]
-    
-    # Debugging
-    print(last_row_selected)
-    
-    # If no selection is made, take the taxon set members from the top TaxSEA result. Otherwise, use the last selection.
-    if (is.null(last_row_selected)) {
-      taxa_of_interest <- unlist(strsplit(taxseaResults()[[input$database_selection]][[5]][1], ", "))
-      plot_title <- taxseaResults()[[input$database_selection]][[1]][1]
-    } else {
-      taxa_of_interest <- unlist(strsplit(taxseaResults()[[input$database_selection]][[5]][last_row_selected], ", "))
-      plot_title <- taxseaResults()[[input$database_selection]][[1]][last_row_selected]
-    }
-
-    # TODO: Support hyphens as well as underscores (input may also be supplied with spaces already)
-    taxa_of_interest <- str_replace(taxa_of_interest, " ", "_")
-    
-    dataForPlot$is_of_interest <- dataForPlot[[1]] %in% taxa_of_interest
-    
-    label_data <- dataForPlot[dataForPlot$is_of_interest != FALSE & dataForPlot[[3]] < 0.05,]
-    label_data$Taxa <- gsub("_", " ", label_data$Taxa)
-    label_data$Abbreviated_taxa <- sub("^([A-Za-z])[a-z]+\\s", "\\1. ", label_data$Taxa)
-    
-    # Debugging
-    print(label_data)
-    print(head(dataForPlot))
-
-    ggplot(dataForPlot, aes(x = dataForPlot[,2], y = -log10(dataForPlot[,3]), color = is_of_interest, alpha=is_of_interest)) +
-      geom_point(aes(
-        size = is_of_interest
-      )) + 
-      theme_classic() +
-      labs(
-        title = plot_title,
-        x = "Input Ranks",
-        y = expression(-log[10] ~ FDR)
+    volcanoPlot <- reactive({
+      req(data())
+      req(taxseaResults())
+      
+      dataForPlot <- data()
+      
+      # Store last selected row, it will be NULL if none are selected
+      last_row_selected <- debounced_selection()[length(debounced_selection())]
+      
+      # If no selection is made, take the taxon set members from the top TaxSEA result. Otherwise, use the last selection.
+      if (is.null(last_row_selected)) {
+        taxa_of_interest <- unlist(strsplit(taxseaResults()[[input$database_selection]][[5]][1], ", "))
+        plot_title <- taxseaResults()[[input$database_selection]][[1]][1]
+      } else {
+        taxa_of_interest <- unlist(strsplit(taxseaResults()[[input$database_selection]][[5]][last_row_selected], ", "))
+        plot_title <- taxseaResults()[[input$database_selection]][[1]][last_row_selected]
+      }
+      
+      # TODO: Support hyphens as well as underscores (input may also be supplied with spaces already)
+      taxa_of_interest <- str_replace(taxa_of_interest, " ", "_")
+      
+      dataForPlot$is_of_interest <- dataForPlot[[1]] %in% taxa_of_interest
+      
+      label_data <- dataForPlot[dataForPlot$is_of_interest != FALSE &
+                                  dataForPlot[[3]] < 0.05, ]
+      label_data$Taxa <- gsub("_", " ", label_data$Taxa)
+      label_data$Abbreviated_taxa <- sub("^([A-Za-z])[a-z]+\\s", "\\1. ", label_data$Taxa)
+      
+      plot <- ggplot(
+        dataForPlot,
+        aes(
+          x = dataForPlot[, 2],
+          y = -log10(dataForPlot[, 3]),
+          color = is_of_interest,
+          alpha = is_of_interest
+        )
       ) +
-      scale_alpha_manual(values = c("FALSE" = 0.3, "TRUE" = 1)) +
-      scale_color_manual(values = c("FALSE" = "grey50", "TRUE" = "steelblue")) +
-      scale_size_manual(values = c("FALSE" = 2, "TRUE" = 4)) +
-      geom_text_repel(data = label_data,
-                      aes(
-                        x = label_data[,2],
-                        y = -log10(label_data[,3]),
-                        label = Abbreviated_taxa,
-                        fontface = "italic"
-                        ),
-                      size = 5) +
-      theme(
-        plot.title = element_text(hjust = 0.5, face = "bold"),
-        axis.text = element_text(size = 12),
-        axis.title = element_text(size = 14),
-        legend.position = "none") +
+        geom_point(aes(size = is_of_interest)) +
+        theme_classic() +
+        labs(title = plot_title,
+             x = "Input Ranks",
+             y = expression(-log[10] ~ FDR)) +
+        scale_alpha_manual(values = c("FALSE" = 0.3, "TRUE" = 1)) +
+        scale_color_manual(values = c("FALSE" = "grey50", "TRUE" = "steelblue")) +
+        scale_size_manual(values = c("FALSE" = 2, "TRUE" = 4)) +
+        geom_text_repel(
+          data = label_data,
+          aes(
+            x = label_data[, 2],
+            y = -log10(label_data[, 3]),
+            label = Abbreviated_taxa,
+            fontface = "italic"
+          ),
+          size = 5
+        ) +
+        theme(
+          plot.title = element_text(hjust = 0.5, face = "bold"),
+          axis.text = element_text(size = 12),
+          axis.title = element_text(size = 14),
+          legend.position = "none"
+        ) +
         geom_vline(xintercept = 0, linetype = 5)
+      
+      volcanoPlotReady(TRUE)
+      return(plot)
   })
   
+    # Output the volcano plot
+    output$volcanoPlot <- renderPlot({
+      volcanoPlot()
+    })
+    
   # Render the data table
   output$table = DT::renderDataTable({
     req(taxseaResults())
-    datatable(
+    updateActionButton(session, "downloadTable", label = "Download", disabled = FALSE)
+    table <- datatable(
       taxseaResults()[[input$database_selection]],
       filter = "top",
       options = list (
@@ -394,36 +400,87 @@ server <- function(input, output, session) {
         columns = 5,
         fontStyle = "italic"
       )
+    
+    dataTableReady(TRUE)
+    return(table)
   })
   
-
-  # Handle downloads
+  # Handle sample data download
+  output$downloadSampleData <- downloadHandler(
+    filename = function() {"Shiny-TaxSEA_sample_data.csv"},
+    content = function(file) {
+      file.copy("Shiny-TaxSEA_sample_data.csv", file)
+    }
+  )
+  
+  # Render bar plot download button only when ready
+  output$downloadBarPlotUi <- renderUI({
+    req(barPlotReady())
+    downloadButton(
+      "downloadBarPlot",
+      icon = icon("cloud-download"),
+      "Download",
+      class = "btn-sm btn-primary ms-auto"
+    )
+  })
+  
+  # Handle bar plot download
+  output$downloadBarPlot <- downloadHandler(
+    filename = function() {
+      paste0("Shiny-TaxSEA_", gsub("_(.)", "_\\U\\1", input$database_selection, perl = TRUE), "_Bar_Plot_", format(Sys.time(), "%Y%m%d_%H%M%S"),".png")
+    },
+    content = function(file){
+      png(file, width = 800, height = 400)
+      print(barPlot())
+      dev.off()
+    }
+  )
+  
+  # Render volcano plot download button only when ready
+  output$downloadVolcanoPlotUi <- renderUI({
+    req(volcanoPlotReady())
+    downloadButton(
+      "downloadVolcanoPlot",
+      icon = icon("cloud-download"),
+      "Download",
+      class = "btn-sm btn-primary ms-auto"
+    )
+  })
+  
+  # Handle bar plot download
+  output$downloadVolcanoPlot <- downloadHandler(
+    filename = function() {
+      paste0("Shiny-TaxSEA_", gsub("_(.)", "_\\U\\1", input$database_selection, perl = TRUE), "_Volcano_Plot_", format(Sys.time(), "%Y%m%d_%H%M%S"),".png")
+    },
+    content = function(file){
+      png(file, width = 800, height = 400)
+      print(volcanoPlot())
+      dev.off()
+    }
+  )
+  
+  # Render table download button only when ready
+  output$downloadDataTableUi <- renderUI({
+    req(dataTableReady())
+    downloadButton(
+      "downloadTable",
+      icon = icon("cloud-download"),
+      "Download",
+      class = "btn-sm btn-primary ms-auto"
+    )
+  })
+  
+  # Handle table download
   output$downloadTable <- downloadHandler(
     filename = function() {
-      paste(input$database_selection, "_", Sys.Date(), ".csv", sep = "")
+      paste0("Shiny-TaxSEA_", gsub("_(.)", "_\\U\\1", input$database_selection, perl = TRUE), "_Results_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv")
     },
     content = function(file) {
       write.csv(taxseaResults()[[input$database_selection]], file, row.names = FALSE)
-    }
+    },
+    # contentType = "text/csv"
   )
 }
 
-# JavaScript to disable and enable buttons
-jsCode <- "
-Shiny.addCustomMessageHandler('disable_button', function(id) {
-  document.getElementById(id).setAttribute('disabled', 'true');
-});
-
-Shiny.addCustomMessageHandler('enable_button', function(id) {
-  document.getElementById(id).removeAttribute('disabled');
-});
-"
-
-# Include JS in UI
-ui <- tagList(
-  tags$script(jsCode),
-  ui
-)
-
-# Run the application 
+# Run the app
 shinyApp(ui = ui, server = server)
